@@ -2,6 +2,8 @@
 """
 COUPA Email Bot Evaluator
 """
+import re
+import html
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -25,7 +27,56 @@ INTENT_COL_MAP = {
     "purchase": ("y_purchase", "prob_purchase"),
 }
 
-CSV_PATH_DEFAULT = "procurement_emails_15k_with_intents_entities.csv"
+CSV_PATH_DEFAULT = "procurement_emails_15k_with_entities_flagged.csv"
+
+def kpi_card(label, value, delta=None, color="#f0f2f6"):
+    st.markdown(f"""
+        <div style="
+            padding: 1rem;
+            background-color: {color};
+            border-radius: 0.5rem;
+            box-shadow: 0 0 5px rgba(0,0,0,0.05);
+            margin-bottom: 1rem;
+            height: 120px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        ">
+            <div style="font-size: 0.85rem; font-weight: 600; color: #6c757d; word-wrap: break-word;">
+                {label}
+            </div>
+            <div style="font-size: 1.5rem; font-weight: 700; color: #000000;">
+                {value}
+            </div>
+            {f'<div style="font-size: 0.8rem; color: green;">+{delta}</div>' if delta else ''}
+        </div>
+    """, unsafe_allow_html=True)
+
+
+def highlight_entities(text, entity_dict_str):
+    try:
+        entity_dict = eval(entity_dict_str) if isinstance(entity_dict_str, str) else entity_dict_str
+    except Exception:
+        return html.escape(text)  # fallback if eval fails
+
+    text = html.escape(text)
+
+    green_words = entity_dict.get("green", [])
+    red_words = entity_dict.get("red", [])
+
+    color_map = {word: "green" for word in green_words}
+    color_map.update({word: "red" for word in red_words})
+
+    # Sort to replace longer phrases first
+    sorted_keywords = sorted(color_map.keys(), key=len, reverse=True)
+
+    for word in sorted_keywords:
+        escaped_word = re.escape(html.escape(word))
+        colored = f"<span style='color:{color_map[word]}; font-weight:bold'>{word}</span>"
+        text = re.sub(escaped_word, colored, text, flags=re.IGNORECASE)
+
+    return text
+
 
 @st.cache_data(show_spinner=True)
 def load_data(path: str) -> pd.DataFrame:
@@ -105,7 +156,12 @@ with st.sidebar:
     pf_choice = st.multiselect("Procurement Function", options=["All"] + all_functions, default=["All"])
 
     all_intents = list(INTENT_COL_MAP.keys())
-    selected_intents = st.multiselect("Intent to Evaluate (CM & ROC)", options=all_intents, default=all_intents)
+    select_all_intents = st.checkbox("Select All Intents", value=True)
+    if select_all_intents:
+        selected_intents = st.multiselect("Intent to Evaluate (CM & ROC)", options=all_intents, default=all_intents, key="intents_all")
+    else:
+        selected_intents = st.multiselect("Intent to Evaluate (CM & ROC)", options=all_intents, key="intents_custom")
+
 
 if "All" in pf_choice:
     df_filtered = apply_date_filter(df, date_choice, start_date, end_date)
@@ -131,27 +187,36 @@ with tab1:
         st.subheader("Key KPIs")
         total_emails = len(df_filtered)
         correct_intents = (df_filtered["intent"] == df_filtered["intent_identified"]).sum()
-        st.metric("Total Emails", total_emails)
-        st.metric("Correctly Identified Intents", correct_intents)
+        k1, k2, k3, k4 = st.columns(4)
+        with k1: kpi_card("Total Emails", total_emails)
+        with k2: kpi_card("Correctly Identified Intents", correct_intents)
+        with k3: kpi_card("Total Entities", int(total_entities))
+        with k4: kpi_card("Correct Entities Identified", int(correct_entities))
 
-        filtered_by_intents = pd.DataFrame()
+        filtered_intent_rows = []
+
         for intent_eval in selected_intents:
             y_col, p_col = INTENT_COL_MAP[intent_eval]
             if y_col in df_filtered.columns and p_col in df_filtered.columns:
-                filtered_by_intents = pd.concat([filtered_by_intents, df_filtered[[y_col, p_col, "overall_accuracy", "overall_macro_f1", "llm_judge_score", "cohen_kappa"]]])
+                filtered_intent_rows.append(df_filtered[[y_col, p_col, "overall_accuracy", "overall_macro_f1", "llm_judge_score", "cohen_kappa"]])
 
-        filtered_by_intents = filtered_by_intents.drop_duplicates()
+        if filtered_intent_rows:
+            df_scores = pd.concat(filtered_intent_rows).drop_duplicates()
+        else:
+            df_scores = pd.DataFrame(columns=["overall_accuracy", "overall_macro_f1", "llm_judge_score", "cohen_kappa"])
 
-        acc_mean = safe_mean(filtered_by_intents.get("overall_accuracy", pd.Series(dtype=float)))
-        f1_mean = safe_mean(filtered_by_intents.get("overall_macro_f1", pd.Series(dtype=float)))
-        llm_mean = safe_mean(filtered_by_intents.get("llm_judge_score", pd.Series(dtype=float)))
-        kappa_mean = safe_mean(filtered_by_intents.get("cohen_kappa", pd.Series(dtype=float)))
+        acc_mean = safe_mean(df_scores.get("overall_accuracy", pd.Series(dtype=float)))
+        f1_mean = safe_mean(df_scores.get("overall_macro_f1", pd.Series(dtype=float)))
+        llm_mean = safe_mean(df_scores.get("llm_judge_score", pd.Series(dtype=float)))
+        kappa_mean = safe_mean(df_scores.get("cohen_kappa", pd.Series(dtype=float)))
+        
+        st.markdown("<div style='margin-top: 2rem;'></div>", unsafe_allow_html=True)
 
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Avg Accuracy", f"{acc_mean:.3f}" if not np.isnan(acc_mean) else "NA")
-        k2.metric("Avg F1 Score", f"{f1_mean:.3f}" if not np.isnan(f1_mean) else "NA")
-        k3.metric("Avg LLM Score", f"{llm_mean:.3f}" if not np.isnan(llm_mean) else "NA")
-        k4.metric("Avg Cohen Kappa", f"{kappa_mean:.3f}" if not np.isnan(kappa_mean) else "NA")
+        with k1: kpi_card("Avg Accuracy", f"{acc_mean:.3f}" if not np.isnan(acc_mean) else "NA")
+        with k2: kpi_card("Avg F1 Score", f"{f1_mean:.3f}" if not np.isnan(f1_mean) else "NA")
+        with k3: kpi_card("Avg LLM Score", f"{llm_mean:.3f}" if not np.isnan(llm_mean) else "NA")
+        with k4: kpi_card("Avg Cohen Kappa", f"{kappa_mean:.3f}" if not np.isnan(kappa_mean) else "NA")
 
     st.markdown("---")
     st.subheader("Evaluation per Intent")
@@ -204,7 +269,14 @@ with tab2:
     gb.configure_selection(selection_mode="single", use_checkbox=False)
     gb.configure_default_column(filter="agTextColumnFilter", editable=False, enableRowGroup=True, enablePivot=True, enableValue=True, sortable=True, resizable=True)
     for col in table_cols:
-        gb.configure_column(col, filter=True)
+        gb.configure_column(
+            col,
+            wrapText=True,
+            autoHeight=True,
+            resizable=True,
+            sortable=True,
+            filter=True
+        )
     grid_options = gb.build()
 
     grid_response = AgGrid(
@@ -235,7 +307,11 @@ with tab2:
                 st.markdown(f"**To:** {row_data.get('to', '')}")
                 st.markdown(f"**Intent / Identified:** {row_data.get('intent', '')} / {row_data.get('intent_identified', '')}")
                 st.markdown("**Body:**")
-                st.write(row_data.get("body", "No email body found."))
+                email_body = row_data.get("body", "No email body found.")
+                entity_info = df2.loc[df2["sl_number"] == selected_sl, "entities_identified"].values[0]
+                highlighted = highlight_entities(email_body, entity_info)
+                st.markdown(highlighted, unsafe_allow_html=True)
+
 
     csv = df_display.to_csv(index=False).encode("utf-8")
     st.download_button("Download detailed table as CSV", data=csv, file_name="detailed_emails.csv", mime="text/csv")
