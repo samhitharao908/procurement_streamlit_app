@@ -15,6 +15,21 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 st.set_page_config(page_title="COUPA Email Bot Evaluator", layout="wide")
 
+st.markdown("""
+    <style>
+    /* Change selected row color in AgGrid (streamlit theme) */
+    .ag-theme-streamlit .ag-row.ag-row-selected {
+        background-color: #e6f2ff !important;  /* light blue */
+    }
+
+    /* Optional: also change hover color to match */
+    .ag-theme-streamlit .ag-row:hover {
+        background-color: #f0f8ff !important;  /* very light blue */
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+
 INTENT_COL_MAP = {
     "payment": ("y_payment", "prob_payment"),
     "invoice": ("y_invoice", "prob_invoice"),
@@ -277,16 +292,34 @@ with tab2:
             sortable=True,
             filter=True
         )
+
+    # ✅ Custom widths per column
+    gb.configure_column("sl_number", width=75)
+    gb.configure_column("date", width=140)
+    gb.configure_column("subject", width=300)
+    gb.configure_column("from", width=250)
+    gb.configure_column("to", width=250)
+    gb.configure_column("intent", width=120)
+    gb.configure_column("intent_identified", width=160)
+
     grid_options = gb.build()
+
+    custom_style = {
+    "backgroundColor": "#e6f2ff",  # Unilever light blue
+    "border": "1px solid #0033a0"
+    }
 
     grid_response = AgGrid(
         df_display[table_cols],
         gridOptions=grid_options,
         update_mode=GridUpdateMode.SELECTION_CHANGED,
         data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
-        theme="streamlit",
+        theme="balham",
         height=400,
         fit_columns_on_grid_load=True,
+        **{
+            "rowStyle": custom_style  # 👈 THIS is the actual working fix
+        }
     )
 
     selected_rows = grid_response.get("selected_rows", [])
