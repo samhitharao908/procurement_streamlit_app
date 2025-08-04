@@ -1,6 +1,6 @@
 # app.py
 """
-COUPA Email Bot Evaluator
+Email Bot Evaluator
 """
 import re
 import html
@@ -13,7 +13,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
-st.set_page_config(page_title="COUPA Email Bot Evaluator", layout="wide")
+st.set_page_config(page_title="Email Bot Evaluator", layout="wide")
 
 st.markdown("""
     <style>
@@ -42,7 +42,7 @@ INTENT_COL_MAP = {
     "purchase": ("y_purchase", "prob_purchase"),
 }
 
-CSV_PATH_DEFAULT = "procurement_emails_15k_with_entities_flagged.csv"
+CSV_PATH_DEFAULT = "procurement_email_template_50.csv"
 
 def kpi_card(label, value, delta=None, color="#f0f2f6"):
     st.markdown(f"""
@@ -67,41 +67,48 @@ def kpi_card(label, value, delta=None, color="#f0f2f6"):
         </div>
     """, unsafe_allow_html=True)
 
+def highlight_entities(text, entity_list):
+    if isinstance(entity_list, str):
+        try:
+            entity_list = eval(entity_list)
+        except Exception:
+            return text  # fallback if eval fails
 
-def highlight_entities(text, entity_dict_str):
-    try:
-        entity_dict = eval(entity_dict_str) if isinstance(entity_dict_str, str) else entity_dict_str
-    except Exception:
-        return html.escape(text)  # fallback if eval fails
+    if not isinstance(entity_list, list):
+        return text
 
-    text = html.escape(text)
+    if not entity_list:
+        return text
 
-    green_words = entity_dict.get("green", [])
-    red_words = entity_dict.get("red", [])
+    # Sort by length to match longer phrases first
+    sorted_entities = sorted(set(entity_list), key=len, reverse=True)
 
-    color_map = {word: "green" for word in green_words}
-    color_map.update({word: "red" for word in red_words})
-
-    # Sort to replace longer phrases first
-    sorted_keywords = sorted(color_map.keys(), key=len, reverse=True)
-
-    for word in sorted_keywords:
-        escaped_word = re.escape(html.escape(word))
-        colored = f"<span style='color:{color_map[word]}; font-weight:bold'>{word}</span>"
-        text = re.sub(escaped_word, colored, text, flags=re.IGNORECASE)
+    for word in sorted_entities:
+        if not word.strip():
+            continue
+        escaped_word = re.escape(word)
+        replacement = f"<span style='font-weight:bold; color:black'>{word}</span>"
+        text = re.sub(escaped_word, replacement, text, flags=re.IGNORECASE)
 
     return text
 
-
 @st.cache_data(show_spinner=True)
 def load_data(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, parse_dates=["timestamp"])
+    df = pd.read_csv(path)
+
+    # Normalize column names
+    df.columns = df.columns.str.strip().str.lower()
+
+    # Explicitly convert timestamp column
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
     required_cols = [
-        "timestamp", "procurement_function",
+        "timestamp", "function",
         "intent", "intent_identified",
         "number_of_entities", "number_of_entities_identified",
         "overall_accuracy", "overall_macro_f1", "llm_judge_score", "cohen_kappa",
-        "from_name", "from_email", "to_name", "to_email", "subject", "body",
+        "from_email", "to_email", "subject", "raw_email",
     ]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
@@ -147,7 +154,7 @@ def roc_plot(fpr, tpr, roc_auc, title_suffix=""):
     )
     return fig
 
-st.title("📧 COUPA Email Bot Evaluator Dashboard")
+st.title("📧 Email Bot Evaluator Dashboard")
 
 df = load_data(CSV_PATH_DEFAULT)
 
@@ -167,7 +174,7 @@ with st.sidebar:
     else:
         start_date, end_date = None, None
 
-    all_functions = sorted(df["procurement_function"].dropna().unique())
+    all_functions = sorted(df["function"].dropna().unique())
     pf_choice = st.multiselect("Procurement Function", options=["All"] + all_functions, default=["All"])
 
     all_intents = list(INTENT_COL_MAP.keys())
@@ -181,7 +188,7 @@ with st.sidebar:
 if "All" in pf_choice:
     df_filtered = apply_date_filter(df, date_choice, start_date, end_date)
 else:
-    df_filtered = apply_date_filter(df[df["procurement_function"].isin(pf_choice)], date_choice, start_date, end_date)
+    df_filtered = apply_date_filter(df[df["function"].isin(pf_choice)], date_choice, start_date, end_date)
 
 tab1, tab2 = st.tabs(["📊 Overview (Sheet 1)", "📋 Detailed Table (Sheet 2)"])
 
@@ -204,7 +211,7 @@ with tab1:
         correct_intents = (df_filtered["intent"] == df_filtered["intent_identified"]).sum()
         k1, k2, k3, k4 = st.columns(4)
         with k1: kpi_card("Total Emails", total_emails)
-        with k2: kpi_card("Correctly Identified Intents", correct_intents)
+        with k2: kpi_card("Correctly Identified Categories", correct_intents)
         with k3: kpi_card("Total Entities", int(total_entities))
         with k4: kpi_card("Correct Entities Identified", int(correct_entities))
 
@@ -273,11 +280,19 @@ with tab2:
     df2 = df.copy()
     df2["sl_number"] = range(1, len(df2) + 1)
     df2["date"] = pd.to_datetime(df2["timestamp"]).dt.date if "timestamp" in df2.columns else pd.NaT
-    df2["from"] = df2.get("from_name", "").astype(str) + " <" + df2.get("from_email", "").astype(str) + ">"
-    df2["to"] = df2.get("to_name", "").astype(str) + " <" + df2.get("to_email", "").astype(str) + ">"
+    # Provide default values if columns are missing
+    df2["from_name"] = df2.get("from_name", pd.Series(["Unknown"] * len(df2)))
+    df2["from_email"] = df2.get("from_email", pd.Series(["unknown@example.com"] * len(df2)))
+    df2["to_name"] = df2.get("to_name", pd.Series(["Unknown"] * len(df2)))
+    df2["to_email"] = df2.get("to_email", pd.Series(["unknown@example.com"] * len(df2)))
 
-    table_cols = ["sl_number", "date", "from", "to", "subject", "intent", "intent_identified"]
-    all_cols = table_cols + ["body"]
+    # Ensure they are all strings
+    df2["from"] = df2["from_name"].astype(str) + " <" + df2["from_email"].astype(str) + ">"
+    df2["to"] = df2["to_name"].astype(str) + " <" + df2["to_email"].astype(str) + ">"
+
+    table_cols = ["sl_number", "date", "from", "to", "raw_email", "intent", "intent_identified"]
+    all_cols = table_cols  # No need to add 'raw_email' again
+
     df_display = df2[all_cols].copy()
 
     gb = GridOptionsBuilder.from_dataframe(df_display[table_cols])
@@ -296,11 +311,11 @@ with tab2:
     # ✅ Custom widths per column
     gb.configure_column("sl_number", width=75)
     gb.configure_column("date", width=140)
-    gb.configure_column("subject", width=300)
+    gb.configure_column("raw_email", header_name="Raw Email", width=300)
     gb.configure_column("from", width=250)
     gb.configure_column("to", width=250)
-    gb.configure_column("intent", width=120)
-    gb.configure_column("intent_identified", width=160)
+    gb.configure_column("intent",header_name="Category", width=120)
+    gb.configure_column("intent_identified",header_name="Category identified", width=160)
 
     grid_options = gb.build()
 
@@ -335,13 +350,13 @@ with tab2:
         if not match.empty:
             row_data = match.iloc[0]
             st.markdown("---")
-            with st.expander(f"📧 Full Email: {row_data.get('subject', '')}", expanded=True):
+            with st.expander(f"📧 Full Email: {row_data.get('raw_email', '')}", expanded=True):
                 st.markdown(f"**From:** {row_data.get('from', '')}")
                 st.markdown(f"**To:** {row_data.get('to', '')}")
                 st.markdown(f"**Intent / Identified:** {row_data.get('intent', '')} / {row_data.get('intent_identified', '')}")
-                st.markdown("**Body:**")
-                email_body = row_data.get("body", "No email body found.")
-                entity_info = df2.loc[df2["sl_number"] == selected_sl, "entities_identified"].values[0]
+                st.markdown("**Original Email:**")
+                email_body = row_data.get("raw_email", "No email body found.")
+                entity_info = df2.loc[df2["sl_number"] == selected_sl, "entities detected"].values[0]
                 highlighted = highlight_entities(email_body, entity_info)
                 st.markdown(highlighted, unsafe_allow_html=True)
 
