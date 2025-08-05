@@ -7,6 +7,8 @@ from sklearn.metrics import confusion_matrix, roc_curve, auc
 import plotly.express as px
 import plotly.graph_objects as go
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
+import uuid
+
 
 st.set_page_config(page_title="Email Bot Evaluator", layout="wide")
 
@@ -41,6 +43,44 @@ def kpi_card(label, value, delta=None, color="#f0f2f6"):
         </div>
     """, unsafe_allow_html=True)
 
+
+def clickable_kpi_card(label, value, state_key, color="#f0f2f6"):
+    card_id = str(uuid.uuid4()).replace("-", "")
+
+    st.markdown(f"""
+        <div onclick="document.getElementById('{card_id}').click()" style="
+            cursor: pointer;
+            padding: 1rem;
+            background-color: {color};
+            border-radius: 0.5rem;
+            box-shadow: 0 0 5px rgba(0,0,0,0.05);
+            margin-bottom: 1rem;
+            height: 120px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        ">
+            <div style="font-size: 0.85rem; font-weight: 600; color: #6c757d;">
+                {label}
+            </div>
+            <div style="font-size: 1.5rem; font-weight: 700; color: #000000;">
+                {value}
+            </div>
+        </div>
+        <form action="#" method="post">
+            <input type="submit" id="{card_id}" style="display: none;">
+        </form>
+    """, unsafe_allow_html=True)
+
+    with st.form(key=card_id):
+        if st.form_submit_button(""):
+            st.session_state["_triggered_card"] = card_id
+
+    if st.session_state.get("_triggered_card") == card_id:
+        st.session_state[state_key] = not st.session_state.get(state_key, False)
+        st.session_state["_triggered_card"] = None
+
+
 def highlight_entities(text, entity_dict):
     if isinstance(entity_dict, str):
         try:
@@ -74,7 +114,13 @@ def compute_roc(y_true, y_score):
 CSV_PATH = "procurement_emails_5000_full.csv"
 df = load_data(CSV_PATH)
 
+if "show_accuracy_details" not in st.session_state:
+    st.session_state.show_accuracy_details = False
+
 st.title("📧 Email Bot Evaluator Dashboard")
+
+if "_triggered_card" not in st.session_state:
+    st.session_state["_triggered_card"] = None
 
 # Sidebar filters
 with st.sidebar:
@@ -122,6 +168,21 @@ with st.sidebar:
     if "All" not in selected_functions:
         df_filtered = df_filtered[df_filtered["procurement_function"].isin(selected_functions)]
 
+# Calculate category match (1 or 0)
+df_filtered["category_correct"] = (df_filtered["category"] == df_filtered["category_identified"]).astype(int)
+
+# Calculate entity accuracy per email
+df_filtered["entity_accuracy"] = df_filtered.apply(
+    lambda row: row["number_of_entities_identified"] / row["number_of_entities"]
+    if row["number_of_entities"] > 0 else 0,
+    axis=1
+)
+
+# Email-level accuracy = (category_correct + entity_accuracy) / 2
+df_filtered["email_accuracy"] = (df_filtered["category_correct"] + df_filtered["entity_accuracy"]) / 2
+
+avg_accuracy = df_filtered["email_accuracy"].mean()
+
 # Tabs
 tab1, tab2 = st.tabs(["📊 Overview", "📋 Detailed Table"])
 
@@ -144,26 +205,55 @@ with tab1:
 
     with right_col:
         total_emails = len(df_filtered)
-        correct_emails = correct
+        correct_emails = int(df_filtered["is_correct"].sum())
         total_categories = total_emails
         correct_categories = int((df_filtered["category"] == df_filtered["category_identified"]).sum())
         total_entities = int(df_filtered["number_of_entities"].sum())
         correct_entities = int(df_filtered["number_of_entities_identified"].sum())
 
+        avg_llm_score = df_filtered["llm_judge_score"].mean()
+        avg_slm_accuracy = df_filtered["category_correct"].mean()
+        category_accuracy = (avg_llm_score + avg_slm_accuracy) / 2
+
+        # Row 1 – Totals
         r1c1, r1c2, r1c3 = st.columns(3)
         with r1c1: kpi_card("📬 Total Emails", total_emails)
         with r1c2: kpi_card("🏷️ Total Categories", total_categories)
         with r1c3: kpi_card("🔢 Total Entities", total_entities)
 
+        # Row 2 – Correct
         r2c1, r2c2, r2c3 = st.columns(3)
-        with r2c1: kpi_card("✅ Correct Emails", correct_emails)
-        with r2c2: kpi_card("🎯 Correct Categories", correct_categories)
-        with r2c3: kpi_card("📌 Correct Entities", correct_entities)
+        with r2c1: kpi_card("✅ Correctly categorized Emails", correct_emails)
+        with r2c2: kpi_card("🎯 Correctly identified Categories", correct_categories)
+        with r2c3: kpi_card("📌 Correct idenfitied Entities", correct_entities)
 
+        # Row 3 – Accuracy
         r3c1, r3c2, r3c3 = st.columns(3)
-        with r3c1: kpi_card("📈 Email Accuracy", f"{correct_emails / total_emails:.2%}" if total_emails else "N/A")
-        with r3c2: kpi_card("📊 Category Accuracy", f"{correct_categories / total_categories:.2%}" if total_categories else "N/A")
-        with r3c3: kpi_card("📐 Entity Accuracy", f"{correct_entities / total_entities:.2%}" if total_entities else "N/A")
+
+        with r3c1:
+            kpi_card("📈 Email Accuracy", f"{avg_accuracy:.2%}")
+
+        with r3c2:
+            kpi_card("📊 Category Accuracy", f"{category_accuracy:.2%}")
+
+        with r3c3:
+            kpi_card("📌 Entity Accuracy", f"{correct_entities / total_entities:.2%}" if total_entities else "N/A")
+
+
+        if "show_accuracy_details" not in st.session_state:
+            st.session_state.show_accuracy_details = False
+
+        if st.button("🔍 View Category Accuracy Breakdown"):
+            st.session_state.show_accuracy_details = not st.session_state["show_accuracy_details"]
+        if st.session_state.show_accuracy_details:
+            st.markdown("#### 📂 Category Accuracy Breakdown")
+            d1, d2 = st.columns(2)
+            with d1:
+                kpi_card("🤖 LLM Judge Score", f"{avg_llm_score:.2%}")
+            with d2:
+                kpi_card("🧠 SLM Accuracy", f"{avg_slm_accuracy:.2%}")
+
+
 
     # Confusion Matrices
     st.markdown("---")
