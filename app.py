@@ -1,13 +1,8 @@
-# app.py
-"""
-Email Bot Evaluator
-"""
 import re
-import html
 import pandas as pd
 import numpy as np
 import streamlit as st
-from datetime import datetime, timedelta
+from datetime import datetime
 from sklearn.metrics import confusion_matrix, roc_curve, auc
 import plotly.express as px
 import plotly.graph_objects as go
@@ -15,34 +10,13 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 st.set_page_config(page_title="Email Bot Evaluator", layout="wide")
 
-st.markdown("""
-    <style>
-    /* Change selected row color in AgGrid (streamlit theme) */
-    .ag-theme-streamlit .ag-row.ag-row-selected {
-        background-color: #e6f2ff !important;  /* light blue */
-    }
-
-    /* Optional: also change hover color to match */
-    .ag-theme-streamlit .ag-row:hover {
-        background-color: #f0f8ff !important;  /* very light blue */
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-
-INTENT_COL_MAP = {
-    "payment": ("y_payment", "prob_payment"),
-    "invoice": ("y_invoice", "prob_invoice"),
-    "sourcing": ("y_sourcing", "prob_sourcing"),
-    "contract": ("y_contract", "prob_contract"),
-    "grn": ("y_grn", "prob_grn"),
-    "dispute": ("y_dispute", "prob_dispute"),
-    "reminder": ("y_reminder", "prob_reminder"),
-    "clarification": ("y_clarification", "prob_clarification"),
-    "purchase": ("y_purchase", "prob_purchase"),
-}
-
-CSV_PATH_DEFAULT = "procurement_email_template_50.csv"
+@st.cache_data(show_spinner=True)
+def load_data(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df.columns = df.columns.str.strip().str.lower()
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    return df
 
 def kpi_card(label, value, delta=None, color="#f0f2f6"):
     st.markdown(f"""
@@ -57,7 +31,7 @@ def kpi_card(label, value, delta=None, color="#f0f2f6"):
             flex-direction: column;
             justify-content: space-between;
         ">
-            <div style="font-size: 0.85rem; font-weight: 600; color: #6c757d; word-wrap: break-word;">
+            <div style="font-size: 0.85rem; font-weight: 600; color: #6c757d;">
                 {label}
             </div>
             <div style="font-size: 1.5rem; font-weight: 700; color: #000000;">
@@ -67,299 +41,236 @@ def kpi_card(label, value, delta=None, color="#f0f2f6"):
         </div>
     """, unsafe_allow_html=True)
 
-def highlight_entities(text, entity_list):
-    if isinstance(entity_list, str):
+def highlight_entities(text, entity_dict):
+    if isinstance(entity_dict, str):
         try:
-            entity_list = eval(entity_list)
-        except Exception:
-            return text  # fallback if eval fails
-
-    if not isinstance(entity_list, list):
+            entity_dict = eval(entity_dict)
+        except:
+            return text
+    if not isinstance(entity_dict, dict):
         return text
 
-    if not entity_list:
-        return text
+    spans = []
+    for color, words in entity_dict.items():
+        for word in set(words):
+            if not word.strip():
+                continue
+            color_code = "#d4edda" if color == "green" else "#f8d7da"
+            text_color = "green" if color == "green" else "red"
+            escaped_word = re.escape(word)
+            replacement = f"<span style='font-weight:bold; background-color:{color_code}; color:{text_color};'>{word}</span>"
+            spans.append((escaped_word, replacement))
 
-    # Sort by length to match longer phrases first
-    sorted_entities = sorted(set(entity_list), key=len, reverse=True)
-
-    for word in sorted_entities:
-        if not word.strip():
-            continue
-        escaped_word = re.escape(word)
-        replacement = f"<span style='font-weight:bold; color:black'>{word}</span>"
+    spans.sort(key=lambda x: len(x[0]), reverse=True)
+    for escaped_word, replacement in spans:
         text = re.sub(escaped_word, replacement, text, flags=re.IGNORECASE)
-
     return text
-
-@st.cache_data(show_spinner=True)
-def load_data(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-
-    # Normalize column names
-    df.columns = df.columns.str.strip().str.lower()
-
-    # Explicitly convert timestamp column
-    if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-
-    required_cols = [
-        "timestamp", "function",
-        "intent", "intent_identified",
-        "number_of_entities", "number_of_entities_identified",
-        "overall_accuracy", "overall_macro_f1", "llm_judge_score", "cohen_kappa",
-        "from_email", "to_email", "subject", "raw_email",
-    ]
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        st.warning(f"The following expected columns are missing in your CSV: {missing}")
-    return df
-
-def apply_date_filter(df, date_choice, start_date=None, end_date=None):
-    now = pd.Timestamp.now()
-    presets = {
-        "Past 1 Day": 1,
-        "Past 7 Days": 7,
-        "Past 30 Days": 30,
-        "Past 3 Months": 90,
-        "Past 6 Months": 180,
-    }
-    if date_choice in presets:
-        ed = now
-        sd = now - pd.Timedelta(days=presets[date_choice])
-    else:
-        sd = pd.to_datetime(start_date)
-        ed = pd.to_datetime(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-    return df[(df["timestamp"] >= sd) & (df["timestamp"] <= ed)]
-
-def safe_mean(series):
-    try:
-        return float(series.dropna().mean())
-    except Exception:
-        return np.nan
 
 def compute_roc(y_true, y_score):
     fpr, tpr, _ = roc_curve(y_true, y_score)
-    roc_auc = auc(fpr, tpr)
-    return fpr, tpr, roc_auc
+    return fpr, tpr, auc(fpr, tpr)
 
-def roc_plot(fpr, tpr, roc_auc, title_suffix=""):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"ROC curve (AUC = {roc_auc:.2f})"))
-    fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="Chance", line=dict(dash="dash")))
-    fig.update_layout(
-        title=f"ROC Curve {title_suffix}",
-        xaxis_title="False Positive Rate",
-        yaxis_title="True Positive Rate",
-    )
-    return fig
+# Load data
+CSV_PATH = "procurement_emails_5000_full.csv"
+df = load_data(CSV_PATH)
 
 st.title("📧 Email Bot Evaluator Dashboard")
 
-df = load_data(CSV_PATH_DEFAULT)
-
+# Sidebar filters
 with st.sidebar:
     st.header("Filters")
-    date_choice = st.selectbox(
-        "Date Range",
-        ["Past 1 Day", "Past 7 Days", "Past 30 Days", "Past 3 Months", "Past 6 Months", "Custom Range"],
-        index=2,
+    st.markdown("### Date Range")
+    date_option = st.selectbox(
+        "Quick Ranges",
+        options=["All Time", "Yesterday", "Last 7 Days", "Last 30 Days", "Last 3 Months", "Last 6 Months", "Last 1 Year", "Custom Range"],
+        index=0
     )
-    if date_choice == "Custom Range":
-        custom_dates = st.date_input("Custom Range (start, end)", value=(df["timestamp"].min(), df["timestamp"].max()))
-        if not isinstance(custom_dates, (list, tuple)) or len(custom_dates) != 2:
-            st.error("Please select a start and end date")
-            st.stop()
-        start_date, end_date = custom_dates
-    else:
-        start_date, end_date = None, None
 
-    all_functions = sorted(df["function"].dropna().unique())
-    pf_choice = st.multiselect("Procurement Function", options=["All"] + all_functions, default=["All"])
+    min_date = df["timestamp"].min()
+    max_date = df["timestamp"].max()
 
-    all_intents = list(INTENT_COL_MAP.keys())
-    select_all_intents = st.checkbox("Select All Intents", value=True)
-    if select_all_intents:
-        selected_intents = st.multiselect("Intent to Evaluate (CM & ROC)", options=all_intents, default=all_intents, key="intents_all")
-    else:
-        selected_intents = st.multiselect("Intent to Evaluate (CM & ROC)", options=all_intents, key="intents_custom")
+    if date_option == "All Time":
+        start_date, end_date = min_date, max_date
+    elif date_option == "Yesterday":
+        start_date = end_date = pd.to_datetime("today").normalize() - pd.Timedelta(days=1)
+    elif date_option == "Last 7 Days":
+        end_date = pd.to_datetime("today")
+        start_date = end_date - pd.Timedelta(days=7)
+    elif date_option == "Last 30 Days":
+        end_date = pd.to_datetime("today")
+        start_date = end_date - pd.Timedelta(days=30)
+    elif date_option == "Last 3 Months":
+        end_date = pd.to_datetime("today")
+        start_date = end_date - pd.DateOffset(months=3)
+    elif date_option == "Last 6 Months":
+        end_date = pd.to_datetime("today")
+        start_date = end_date - pd.DateOffset(months=6)
+    elif date_option == "Last 1 Year":
+        end_date = pd.to_datetime("today")
+        start_date = end_date - pd.DateOffset(years=1)
+    elif date_option == "Custom Range":
+        start_date = st.date_input("Start Date", min_value=min_date.date(), max_value=max_date.date(), value=min_date.date())
+        end_date = st.date_input("End Date", min_value=min_date.date(), max_value=max_date.date(), value=max_date.date())
+        start_date = pd.to_datetime(start_date)
+        end_date = pd.to_datetime(end_date)
 
+    df_filtered = df[(df["timestamp"] >= start_date) & (df["timestamp"] <= end_date)].copy()
 
-if "All" in pf_choice:
-    df_filtered = apply_date_filter(df, date_choice, start_date, end_date)
-else:
-    df_filtered = apply_date_filter(df[df["function"].isin(pf_choice)], date_choice, start_date, end_date)
+    all_functions = sorted(df_filtered["procurement_function"].dropna().unique())
+    selected_functions = st.multiselect("Procurement Category", options=["All"] + all_functions, default=["All"])
 
-tab1, tab2 = st.tabs(["📊 Overview (Sheet 1)", "📋 Detailed Table (Sheet 2)"])
+    if "All" not in selected_functions:
+        df_filtered = df_filtered[df_filtered["procurement_function"].isin(selected_functions)]
+
+# Tabs
+tab1, tab2 = st.tabs(["📊 Overview", "📋 Detailed Table"])
 
 with tab1:
-    top_right_col1, top_right_col2 = st.columns([2, 1])
+    st.subheader("📊 Email Classification Summary")
+    left_col, right_col = st.columns([1, 2])
 
-    with top_right_col1:
-        st.subheader("Entity Identification")
-        total_entities = df_filtered["number_of_entities"].sum()
-        correct_entities = df_filtered["number_of_entities_identified"].sum()
-        incorrect_entities = max(total_entities - correct_entities, 0)
-        pie_data = pd.DataFrame({"Entity Match": ["Correctly Identified", "Incorrectly Identified"], "Count": [correct_entities, incorrect_entities]})
-        fig_pie = px.pie(pie_data, values="Count", names="Entity Match", hole=0.4)
+    with left_col:
+        correct = int(df_filtered["is_correct"].sum())
+        incorrect = int(len(df_filtered) - correct)
+
+        pie_data = pd.DataFrame({
+            "Classification": ["Correctly Classified", "Incorrectly Classified"],
+            "Count": [correct, incorrect]
+        })
+
+        fig_pie = px.pie(pie_data, values="Count", names="Classification", hole=0.4)
         fig_pie.update_traces(textposition="inside", textinfo="percent+label")
         st.plotly_chart(fig_pie, use_container_width=True)
 
-    with top_right_col2:
-        st.subheader("Key KPIs")
+    with right_col:
         total_emails = len(df_filtered)
-        correct_intents = (df_filtered["intent"] == df_filtered["intent_identified"]).sum()
-        k1, k2, k3, k4 = st.columns(4)
-        with k1: kpi_card("Total Emails", total_emails)
-        with k2: kpi_card("Correctly Identified Categories", correct_intents)
-        with k3: kpi_card("Total Entities", int(total_entities))
-        with k4: kpi_card("Correct Entities Identified", int(correct_entities))
+        correct_emails = correct
+        total_categories = total_emails
+        correct_categories = int((df_filtered["category"] == df_filtered["category_identified"]).sum())
+        total_entities = int(df_filtered["number_of_entities"].sum())
+        correct_entities = int(df_filtered["number_of_entities_identified"].sum())
 
-        filtered_intent_rows = []
+        r1c1, r1c2, r1c3 = st.columns(3)
+        with r1c1: kpi_card("📬 Total Emails", total_emails)
+        with r1c2: kpi_card("🏷️ Total Categories", total_categories)
+        with r1c3: kpi_card("🔢 Total Entities", total_entities)
 
-        for intent_eval in selected_intents:
-            y_col, p_col = INTENT_COL_MAP[intent_eval]
-            if y_col in df_filtered.columns and p_col in df_filtered.columns:
-                filtered_intent_rows.append(df_filtered[[y_col, p_col, "overall_accuracy", "overall_macro_f1", "llm_judge_score", "cohen_kappa"]])
+        r2c1, r2c2, r2c3 = st.columns(3)
+        with r2c1: kpi_card("✅ Correct Emails", correct_emails)
+        with r2c2: kpi_card("🎯 Correct Categories", correct_categories)
+        with r2c3: kpi_card("📌 Correct Entities", correct_entities)
 
-        if filtered_intent_rows:
-            df_scores = pd.concat(filtered_intent_rows).drop_duplicates()
-        else:
-            df_scores = pd.DataFrame(columns=["overall_accuracy", "overall_macro_f1", "llm_judge_score", "cohen_kappa"])
+        r3c1, r3c2, r3c3 = st.columns(3)
+        with r3c1: kpi_card("📈 Email Accuracy", f"{correct_emails / total_emails:.2%}" if total_emails else "N/A")
+        with r3c2: kpi_card("📊 Category Accuracy", f"{correct_categories / total_categories:.2%}" if total_categories else "N/A")
+        with r3c3: kpi_card("📐 Entity Accuracy", f"{correct_entities / total_entities:.2%}" if total_entities else "N/A")
 
-        acc_mean = safe_mean(df_scores.get("overall_accuracy", pd.Series(dtype=float)))
-        f1_mean = safe_mean(df_scores.get("overall_macro_f1", pd.Series(dtype=float)))
-        llm_mean = safe_mean(df_scores.get("llm_judge_score", pd.Series(dtype=float)))
-        kappa_mean = safe_mean(df_scores.get("cohen_kappa", pd.Series(dtype=float)))
-        
-        st.markdown("<div style='margin-top: 2rem;'></div>", unsafe_allow_html=True)
-
-        k1, k2, k3, k4 = st.columns(4)
-        with k1: kpi_card("Avg Accuracy", f"{acc_mean:.3f}" if not np.isnan(acc_mean) else "NA")
-        with k2: kpi_card("Avg F1 Score", f"{f1_mean:.3f}" if not np.isnan(f1_mean) else "NA")
-        with k3: kpi_card("Avg LLM Score", f"{llm_mean:.3f}" if not np.isnan(llm_mean) else "NA")
-        with k4: kpi_card("Avg Cohen Kappa", f"{kappa_mean:.3f}" if not np.isnan(kappa_mean) else "NA")
-
+    # Confusion Matrices
     st.markdown("---")
-    st.subheader("Evaluation per Intent")
+    st.subheader("Confusion Matrix per Category")
+    categories = sorted(df_filtered["category"].dropna().unique())
+    matrix_cols = st.columns(2)
+    col_idx = 0
 
-    for intent_eval in selected_intents:
-        y_col, p_col = INTENT_COL_MAP[intent_eval]
-        if y_col in df_filtered.columns and p_col in df_filtered.columns:
-            y_true = df_filtered[y_col].dropna().astype(int).clip(0, 1)
-            y_score = df_filtered.loc[y_true.index, p_col].fillna(0.0)
+    for i, cat in enumerate(categories):
+        df_cat = df_filtered[df_filtered["category"] == cat]
+        if df_cat.empty:
+            continue
 
-            if len(y_true.unique()) < 2:
-                st.info(f"Not enough data for `{intent_eval}` to compute metrics.")
-                continue
+        y_true = df_cat["category"]
+        y_pred = df_cat["category_identified"]
+        labels = sorted(set(y_true.unique()).union(y_pred.unique()))
+        cm = confusion_matrix(y_true, y_pred, labels=labels)
 
-            cm = confusion_matrix(y_true, (y_score >= 0.5).astype(int), labels=[0, 1])
-            fpr, tpr, roc_auc = compute_roc(y_true, y_score)
-            fig_roc = roc_plot(fpr, tpr, roc_auc, title_suffix=f" - {intent_eval.title()}")
+        fig_cm = px.imshow(cm, text_auto=True, color_continuous_scale="Blues", x=labels, y=labels,
+                           labels=dict(x="Predicted", y="Actual", color="Count"))
+        fig_cm.update_layout(title=f"Confusion Matrix: {cat}", height=400)
+        matrix_cols[col_idx].plotly_chart(fig_cm, use_container_width=True)
 
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                st.markdown(f"**{intent_eval.title()} - Confusion Matrix**")
-                fig_cm = px.imshow(
-                    cm,
-                    text_auto=True,
-                    color_continuous_scale="Blues",
-                    labels=dict(x="Predicted", y="Actual", color="Count"),
-                    x=["Negative", "Positive"],
-                    y=["Negative", "Positive"],
-                )
-                fig_cm.update_layout(title=f"Confusion Matrix - {intent_eval.title()}")
-                st.plotly_chart(fig_cm, use_container_width=True, key=f"cm_{intent_eval}")
+        col_idx = (col_idx + 1) % 2
+        if col_idx == 0 and i < len(categories) - 1:
+            matrix_cols = st.columns(2)
 
-            with col2:
-                st.markdown(f"**{intent_eval.title()} - ROC Curve**")
-                st.plotly_chart(fig_roc, use_container_width=True, key=f"roc_{intent_eval}")
+    # ROC Curves
+    st.subheader("ROC Curve per Category")
+    roc_cols = st.columns(2)
+    col_idx = 0
 
+    for i, cat in enumerate(categories):
+        df_cat = df_filtered[
+            (df_filtered["category"] == cat) |
+            (df_filtered["category_identified"] == cat)
+        ]
+        if df_cat.empty:
+            continue
+
+        y_true = (df_cat["category"] == cat).astype(int)
+        y_score = (df_cat["category_identified"] == cat).astype(int) * df_cat["pred_confidence"]
+
+        if y_true.nunique() < 2:
+            roc_cols[col_idx].warning(f"Not enough data for {cat}")
+            col_idx = (col_idx + 1) % 2
+            if col_idx == 0 and i < len(categories) - 1:
+                roc_cols = st.columns(2)
+            continue
+
+        fpr, tpr, roc_auc = compute_roc(y_true, y_score)
+        fig_roc = go.Figure()
+        fig_roc.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"AUC = {roc_auc:.2f}"))
+        fig_roc.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", name="Chance", line=dict(dash="dash")))
+        fig_roc.update_layout(title=f"ROC Curve - {cat}", xaxis_title="FPR", yaxis_title="TPR", height=400)
+        roc_cols[col_idx].plotly_chart(fig_roc, use_container_width=True)
+
+        col_idx = (col_idx + 1) % 2
+        if col_idx == 0 and i < len(categories) - 1:
+            roc_cols = st.columns(2)
+
+# Tab 2: Detailed Table
 with tab2:
-    st.subheader("Detailed Email Table")
-    df2 = df.copy()
+    st.subheader("Detailed Table")
+    df2 = df_filtered.copy()
     df2["sl_number"] = range(1, len(df2) + 1)
-    df2["date"] = pd.to_datetime(df2["timestamp"]).dt.date if "timestamp" in df2.columns else pd.NaT
-    # Provide default values if columns are missing
-    df2["from_name"] = df2.get("from_name", pd.Series(["Unknown"] * len(df2)))
-    df2["from_email"] = df2.get("from_email", pd.Series(["unknown@example.com"] * len(df2)))
-    df2["to_name"] = df2.get("to_name", pd.Series(["Unknown"] * len(df2)))
-    df2["to_email"] = df2.get("to_email", pd.Series(["unknown@example.com"] * len(df2)))
-
-    # Ensure they are all strings
-    df2["from"] = df2["from_name"].astype(str) + " <" + df2["from_email"].astype(str) + ">"
-    df2["to"] = df2["to_name"].astype(str) + " <" + df2["to_email"].astype(str) + ">"
-
-    table_cols = ["sl_number", "date", "from", "to", "raw_email", "intent", "intent_identified"]
-    all_cols = table_cols  # No need to add 'raw_email' again
-
-    df_display = df2[all_cols].copy()
-
-    gb = GridOptionsBuilder.from_dataframe(df_display[table_cols])
-    gb.configure_selection(selection_mode="single", use_checkbox=False)
-    gb.configure_default_column(filter="agTextColumnFilter", editable=False, enableRowGroup=True, enablePivot=True, enableValue=True, sortable=True, resizable=True)
-    for col in table_cols:
-        gb.configure_column(
-            col,
-            wrapText=True,
-            autoHeight=True,
-            resizable=True,
-            sortable=True,
-            filter=True
-        )
-
-    # ✅ Custom widths per column
-    gb.configure_column("sl_number", width=75)
-    gb.configure_column("date", width=140)
-    gb.configure_column("raw_email", header_name="Raw Email", width=300)
-    gb.configure_column("from", width=250)
-    gb.configure_column("to", width=250)
-    gb.configure_column("intent",header_name="Category", width=120)
-    gb.configure_column("intent_identified",header_name="Category identified", width=160)
-
+    df2["from"] = df2["from_email"]
+    df2["to"] = df2["to_email"]
+    table_cols = [
+        "sl_number", "timestamp", "from", "to", "subject",
+        "category", "category_identified", "pred_confidence",
+        "number_of_entities", "number_of_entities_identified",
+        "entities_identified", "cluster_id", "llm_judge_score"
+    ]
+    df_display = df2[table_cols].copy()
+    gb = GridOptionsBuilder.from_dataframe(df_display)
+    gb.configure_selection("single", use_checkbox=False)
+    gb.configure_default_column(filter=True, sortable=True, resizable=True, wrapText=True, autoHeight=True)
     grid_options = gb.build()
-
-    custom_style = {
-    "backgroundColor": "#e6f2ff",  # Unilever light blue
-    "border": "1px solid #0033a0"
-    }
-
     grid_response = AgGrid(
-        df_display[table_cols],
-        gridOptions=grid_options,
+        df_display, gridOptions=grid_options,
         update_mode=GridUpdateMode.SELECTION_CHANGED,
         data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
-        theme="balham",
-        height=400,
-        fit_columns_on_grid_load=True,
-        **{
-            "rowStyle": custom_style  # 👈 THIS is the actual working fix
-        }
+        theme="balham", height=400, fit_columns_on_grid_load=True
     )
+    selected = grid_response.get("selected_rows", [])
 
-    selected_rows = grid_response.get("selected_rows", [])
-    if not isinstance(selected_rows, list):
-        try:
-            selected_rows = pd.DataFrame(selected_rows).to_dict("records")
-        except Exception:
-            selected_rows = []
+    if isinstance(selected, pd.DataFrame):
+        selected = selected.to_dict("records")
 
-    if len(selected_rows) > 0:
-        selected_sl = selected_rows[0].get("sl_number")
-        match = df_display[df_display["sl_number"] == selected_sl]
-        if not match.empty:
-            row_data = match.iloc[0]
-            st.markdown("---")
-            with st.expander(f"📧 Full Email: {row_data.get('raw_email', '')}", expanded=True):
-                st.markdown(f"**From:** {row_data.get('from', '')}")
-                st.markdown(f"**To:** {row_data.get('to', '')}")
-                st.markdown(f"**Intent / Identified:** {row_data.get('intent', '')} / {row_data.get('intent_identified', '')}")
-                st.markdown("**Original Email:**")
-                email_body = row_data.get("raw_email", "No email body found.")
-                entity_info = df2.loc[df2["sl_number"] == selected_sl, "entities detected"].values[0]
-                highlighted = highlight_entities(email_body, entity_info)
-                st.markdown(highlighted, unsafe_allow_html=True)
+    if selected:
+        row = selected[0]
+        email_row = df2[df2["sl_number"] == row["sl_number"]].iloc[0]
+        st.markdown("----")
+        st.markdown(f"### 📧 Full Email - Subject: `{email_row['subject']}`")
+        st.markdown(f"**From:** `{email_row['from']}`")
+        st.markdown(f"**To:** `{email_row['to']}`")
+        st.markdown(f"**Category:** `{email_row['category']}`")
+        st.markdown(f"**Identified Category:** `{email_row['category_identified']}`")
+        st.markdown("**Email Body:**")
+
+        highlighted = highlight_entities(email_row["original_email"], email_row["entities_identified"])
+        st.markdown(
+            f"<div style='background-color: #f0f0f0; padding: 1rem; border-radius: 0.5rem; margin-top: 1rem; white-space: pre-wrap; font-family: sans-serif; font-size: 0.95rem; line-height: 1.6;'>{highlighted}</div>",
+            unsafe_allow_html=True
+        )
 
 
     csv = df_display.to_csv(index=False).encode("utf-8")
-    st.download_button("Download detailed table as CSV", data=csv, file_name="detailed_emails.csv", mime="text/csv")
+    st.download_button("Download Table as CSV", data=csv, file_name="detailed_emails.csv", mime="text/csv")
