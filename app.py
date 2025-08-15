@@ -111,49 +111,56 @@ def compute_roc(y_true, y_score):
     return fpr, tpr, auc(fpr, tpr)
 
 # Load data
-CSV_PATH = "procurement_emails_5000_full.csv"
+CSV_PATH = "procurement_emails_with_slm_score.csv"
 df = load_data(CSV_PATH)
 
 if "show_accuracy_details" not in st.session_state:
     st.session_state.show_accuracy_details = False
 
-st.title("📧 Email Bot Evaluator Dashboard")
+st.title("📧 Automated Email Processing Evaluation Suite")
 
 if "_triggered_card" not in st.session_state:
     st.session_state["_triggered_card"] = None
-
-# Sidebar filters
 with st.sidebar:
     st.header("Filters")
     st.markdown("### Date Range")
+
+    # Updated preset options
     date_option = st.selectbox(
         "Quick Ranges",
-        options=["All Time", "Yesterday", "Last 7 Days", "Last 30 Days", "Last 3 Months", "Last 6 Months", "Last 1 Year", "Custom Range"],
+        options=[
+            "All Time", "Today", "Yesterday", "Last 7 Days", "Last 30 Days",
+            "Past Go-Live Phase 1", "Past Go-Live Phase 2", "Custom Range"
+        ],
         index=0
     )
 
     min_date = df["timestamp"].min()
     max_date = df["timestamp"].max()
+    today = pd.to_datetime("today").normalize()
+
+    # Set Go-Live Dates (you can change them later)
+    go_live_phase1 = pd.to_datetime("2025-06-01")
+    go_live_phase2 = pd.to_datetime("2025-07-20")
 
     if date_option == "All Time":
         start_date, end_date = min_date, max_date
+    elif date_option == "Today":
+        start_date = end_date = today
     elif date_option == "Yesterday":
-        start_date = end_date = pd.to_datetime("today").normalize() - pd.Timedelta(days=1)
+        start_date = end_date = today - pd.Timedelta(days=1)
     elif date_option == "Last 7 Days":
-        end_date = pd.to_datetime("today")
+        end_date = today
         start_date = end_date - pd.Timedelta(days=7)
     elif date_option == "Last 30 Days":
-        end_date = pd.to_datetime("today")
+        end_date = today
         start_date = end_date - pd.Timedelta(days=30)
-    elif date_option == "Last 3 Months":
-        end_date = pd.to_datetime("today")
-        start_date = end_date - pd.DateOffset(months=3)
-    elif date_option == "Last 6 Months":
-        end_date = pd.to_datetime("today")
-        start_date = end_date - pd.DateOffset(months=6)
-    elif date_option == "Last 1 Year":
-        end_date = pd.to_datetime("today")
-        start_date = end_date - pd.DateOffset(years=1)
+    elif date_option == "Past Go-Live Phase 1":
+        start_date = go_live_phase1
+        end_date = max_date
+    elif date_option == "Past Go-Live Phase 2":
+        start_date = go_live_phase2
+        end_date = max_date
     elif date_option == "Custom Range":
         start_date = st.date_input("Start Date", min_value=min_date.date(), max_value=max_date.date(), value=min_date.date())
         end_date = st.date_input("End Date", min_value=min_date.date(), max_value=max_date.date(), value=max_date.date())
@@ -162,8 +169,10 @@ with st.sidebar:
 
     df_filtered = df[(df["timestamp"] >= start_date) & (df["timestamp"] <= end_date)].copy()
 
+    df_filtered["slm_score"] = df_filtered["slm_score"] / 100
+
     all_functions = sorted(df_filtered["procurement_function"].dropna().unique())
-    selected_functions = st.multiselect("Procurement Category", options=["All"] + all_functions, default=["All"])
+    selected_functions = st.multiselect("Category", options=["All"] + all_functions, default=["All"])
 
     if "All" not in selected_functions:
         df_filtered = df_filtered[df_filtered["procurement_function"].isin(selected_functions)]
@@ -184,8 +193,10 @@ df_filtered["email_accuracy"] = (df_filtered["category_correct"] + df_filtered["
 avg_accuracy = df_filtered["email_accuracy"].mean()
 
 # Tabs
-tab1, tab2 = st.tabs(["📊 Overview", "📋 Detailed Table"])
+tab1, tab2, tab3 = st.tabs(["📊 Overview", "📋 Detailed Table", "🛠️ Technical View"])
 
+
+# Tab 1: General View
 with tab1:
     st.subheader("📊 Email Classification Summary")
     left_col, right_col = st.columns([1, 2])
@@ -212,7 +223,7 @@ with tab1:
         correct_entities = int(df_filtered["number_of_entities_identified"].sum())
 
         avg_llm_score = df_filtered["llm_judge_score"].mean()
-        avg_slm_accuracy = df_filtered["category_correct"].mean()
+        avg_slm_accuracy = df_filtered["slm_score"].mean()
         category_accuracy = (avg_llm_score + avg_slm_accuracy) / 2
 
         # Row 1 – Totals
@@ -253,68 +264,6 @@ with tab1:
             with d2:
                 kpi_card("🧠 SLM Accuracy", f"{avg_slm_accuracy:.2%}")
 
-
-
-    # Confusion Matrices
-    st.markdown("---")
-    st.subheader("Confusion Matrix per Category")
-    categories = sorted(df_filtered["category"].dropna().unique())
-    matrix_cols = st.columns(2)
-    col_idx = 0
-
-    for i, cat in enumerate(categories):
-        df_cat = df_filtered[df_filtered["category"] == cat]
-        if df_cat.empty:
-            continue
-
-        y_true = df_cat["category"]
-        y_pred = df_cat["category_identified"]
-        labels = sorted(set(y_true.unique()).union(y_pred.unique()))
-        cm = confusion_matrix(y_true, y_pred, labels=labels)
-
-        fig_cm = px.imshow(cm, text_auto=True, color_continuous_scale="Blues", x=labels, y=labels,
-                           labels=dict(x="Predicted", y="Actual", color="Count"))
-        fig_cm.update_layout(title=f"Confusion Matrix: {cat}", height=400)
-        matrix_cols[col_idx].plotly_chart(fig_cm, use_container_width=True)
-
-        col_idx = (col_idx + 1) % 2
-        if col_idx == 0 and i < len(categories) - 1:
-            matrix_cols = st.columns(2)
-
-    # ROC Curves
-    st.subheader("ROC Curve per Category")
-    roc_cols = st.columns(2)
-    col_idx = 0
-
-    for i, cat in enumerate(categories):
-        df_cat = df_filtered[
-            (df_filtered["category"] == cat) |
-            (df_filtered["category_identified"] == cat)
-        ]
-        if df_cat.empty:
-            continue
-
-        y_true = (df_cat["category"] == cat).astype(int)
-        y_score = (df_cat["category_identified"] == cat).astype(int) * df_cat["pred_confidence"]
-
-        if y_true.nunique() < 2:
-            roc_cols[col_idx].warning(f"Not enough data for {cat}")
-            col_idx = (col_idx + 1) % 2
-            if col_idx == 0 and i < len(categories) - 1:
-                roc_cols = st.columns(2)
-            continue
-
-        fpr, tpr, roc_auc = compute_roc(y_true, y_score)
-        fig_roc = go.Figure()
-        fig_roc.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"AUC = {roc_auc:.2f}"))
-        fig_roc.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", name="Chance", line=dict(dash="dash")))
-        fig_roc.update_layout(title=f"ROC Curve - {cat}", xaxis_title="FPR", yaxis_title="TPR", height=400)
-        roc_cols[col_idx].plotly_chart(fig_roc, use_container_width=True)
-
-        col_idx = (col_idx + 1) % 2
-        if col_idx == 0 and i < len(categories) - 1:
-            roc_cols = st.columns(2)
-
 # Tab 2: Detailed Table
 with tab2:
     st.subheader("Detailed Table")
@@ -326,7 +275,7 @@ with tab2:
         "sl_number", "timestamp", "from", "to", "subject",
         "category", "category_identified", "pred_confidence",
         "number_of_entities", "number_of_entities_identified",
-        "entities_identified", "cluster_id", "llm_judge_score"
+        "entities_identified", "cluster_id", "llm_judge_score", "slm_score"
     ]
     df_display = df2[table_cols].copy()
     gb = GridOptionsBuilder.from_dataframe(df_display)
@@ -364,3 +313,84 @@ with tab2:
 
     csv = df_display.to_csv(index=False).encode("utf-8")
     st.download_button("Download Table as CSV", data=csv, file_name="detailed_emails.csv", mime="text/csv")
+
+# Tab 3: Technical View
+with tab3:
+    st.subheader("Model Evaluation")
+
+    # df_filtered is already filtered by procurement_function and date
+    selected_categories = sorted(df_filtered["category"].dropna().unique())
+
+    if not selected_categories:
+        st.warning("⚠️ No categories found after filter.")
+    else:
+        # Confusion Matrices
+        st.markdown("#### Confusion Matrix per Selected Category")
+        matrix_cols = st.columns(2)
+        col_idx = 0
+
+        for i, cat in enumerate(selected_categories):
+            # ONLY rows where this is the actual category
+            df_cat = df_filtered[df_filtered["category"] == cat]
+            if df_cat.empty:
+                continue
+
+            # Only show confusion among predicted values FOR this actual category
+            y_true = df_cat["category"]
+            y_pred = df_cat["category_identified"]
+
+            y_true = df_cat["category"]
+            y_pred = df_cat["category_identified"]
+
+            # Only include labels that are actually in y_true or y_pred
+            labels = sorted(set(y_true.unique()) | set(y_pred.unique()))
+
+            # If no valid labels in y_true, skip
+            if not any(label in y_true.values for label in labels):
+                continue  # skip this category
+
+            cm = confusion_matrix(y_true, y_pred, labels=labels)
+            fig_cm = px.imshow(
+                cm, text_auto=True, color_continuous_scale="Blues", x=labels, y=labels,
+                labels=dict(x="Predicted", y="Actual", color="Count")
+            )
+            fig_cm.update_layout(title=f"Confusion Matrix: {cat}", height=400)
+            matrix_cols[col_idx].plotly_chart(fig_cm, use_container_width=True)
+
+            col_idx = (col_idx + 1) % 2
+            if col_idx == 0 and i < len(selected_categories) - 1:
+                matrix_cols = st.columns(2)
+
+        # ROC Curves
+        st.markdown("#### ROC Curve per Selected Category")
+        roc_cols = st.columns(2)
+        col_idx = 0
+
+        for i, cat in enumerate(selected_categories):
+            df_cat = df_filtered[
+                (df_filtered["category"] == cat) |
+                (df_filtered["category_identified"] == cat)
+            ]
+            if df_cat.empty:
+                continue
+
+            y_true = (df_cat["category"] == cat).astype(int)
+            y_score = (df_cat["category_identified"] == cat).astype(int) * df_cat["pred_confidence"]
+
+            if y_true.nunique() < 2:
+                roc_cols[col_idx].warning(f"Not enough data for {cat}")
+                col_idx = (col_idx + 1) % 2
+                if col_idx == 0 and i < len(selected_categories) - 1:
+                    roc_cols = st.columns(2)
+                continue
+
+            fpr, tpr, roc_auc = compute_roc(y_true, y_score)
+            fig_roc = go.Figure()
+            fig_roc.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"AUC = {roc_auc:.2f}"))
+            fig_roc.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", name="Chance", line=dict(dash="dash")))
+            fig_roc.update_layout(title=f"ROC Curve - {cat}", xaxis_title="FPR", yaxis_title="TPR", height=400)
+            roc_cols[col_idx].plotly_chart(fig_roc, use_container_width=True)
+
+            col_idx = (col_idx + 1) % 2
+            if col_idx == 0 and i < len(selected_categories) - 1:
+                roc_cols = st.columns(2)
