@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 import uuid
 
+
 def clickable_kpi_card(label: str, value, on_click_key: str, color="#f0f2f6"):
     """Renders a KPI 'card' that behaves like a button. Sets st.session_state[on_click_key] to True when clicked."""
     card_id = f"card_{uuid.uuid4().hex}"       # unique DOM id
@@ -260,7 +261,8 @@ with st.sidebar:
         if "All" not in selected_functions:
             df_filtered = df_filtered[df_filtered["procurement_function"].isin(selected_functions)]
 
-# -------------------- Derived Metrics --------------------
+# -------------------- Derived Metrics (clean + safe) --------------------
+
 # Binary category correctness
 df_filtered["category_correct"] = (df_filtered["category"] == df_filtered["category_identified"]).astype(int)
 
@@ -274,14 +276,38 @@ df_filtered["entity_accuracy"] = df_filtered.apply(
 # Email-level accuracy = (category_correct + entity_accuracy) / 2
 df_filtered["email_accuracy"] = (df_filtered["category_correct"] + df_filtered["entity_accuracy"]) / 2
 
-total_rows = len(df)
-filtered_rows = len(df_filtered)
+if "intent_accuracy" not in df_filtered.columns:
+    if {"expected_intent", "intent_identified"}.issubset(df_filtered.columns):
+        df_filtered["intent_accuracy"] = (
+            df_filtered["expected_intent"] == df_filtered["intent_identified"]
+        ).astype(int)
+    else:
+        df_filtered["intent_accuracy"] = np.nan  # no labels -> will show N/A
 
-# Intent accuracy (binary)
-if "expected_intent" in df_filtered.columns and "intent_identified" in df_filtered.columns:
-    df_filtered["intent_accuracy"] = (df_filtered["expected_intent"] == df_filtered["intent_identified"]).astype(int)
-else:
-    df_filtered["intent_accuracy"] = np.nan  # fallback if missing
+# 1) Entities: full-match = correctly identified; if no entities expected, ignore (NaN)
+df_filtered["entity_success"] = np.where(
+    df_filtered["number_of_entities"] > 0,
+    (df_filtered["number_of_entities_identified"] >= df_filtered["number_of_entities"]).astype(int),
+    np.nan
+)
+
+# 2) Categories: “correctly identified” = BOTH LLM & SLM >= 0.7
+df_filtered["cat_correct"] = (
+    (df_filtered["llm_judge_score"] >= 0.7) & (df_filtered["slm_score"] >= 0.7)
+).astype(int)
+
+# -------------------- PASS / FAIL BREAKDOWN --------------------
+# Category pass/fail
+pass_cat_pct = (df_filtered["cat_correct"] == 1).mean()
+fail_cat_pct = 1 - pass_cat_pct
+
+# Intent pass/fail
+pass_int_pct = (df_filtered["intent_accuracy"] == 1).mean()
+fail_int_pct = 1 - pass_int_pct
+
+# Entity pass/fail
+pass_ent_pct = (df_filtered["entity_success"] == 1).mean()
+fail_ent_pct = 1 - pass_ent_pct
 
 # -------------------- NAV (radio we can control) --------------------
 PAGES = ["📊 Overview", "📋 Detailed Table", "🛠️ Technical View"]
@@ -377,7 +403,7 @@ if st.session_state["active_page"] == "📊 Overview":
                 st.session_state["main_filter"] = None
             st.markdown("<script>document.querySelectorAll('button[kind=\"secondary\"]')[2].classList.add('kpi-btn');</script>", unsafe_allow_html=True)
 
-        # ---- Styled breakdown panels (appear based on main_filter) ----
+        # -------------------- PASS Breakdown Panel --------------------
         if st.session_state.get("main_filter") == "pass":
             st.markdown("""
             <div style="border:1px solid #e5e7eb;background:#fafbff;border-radius:12px;
@@ -387,34 +413,29 @@ if st.session_state["active_page"] == "📊 Overview":
 
             pc1, pc2, pc3 = st.columns(3)
             with pc1:
-                cat_pass_rate = (correct_categories / total_categories) if total_categories else 0
-                kpi_card("🏷 Category Pass Rate", f"{cat_pass_rate:.2%}")
+                kpi_card("🎯 Category Accuracy (Pass)", f"{pass_cat_pct:.2%}" if not pd.isna(pass_cat_pct) else "N/A")
                 if st.button("Show Emails", key="btn_cat_pass", use_container_width=True):
                     st.session_state["detail_filter"] = "cat_pass"
                     st.session_state["jump_to_detail"] = True
                     st.rerun()
-                st.markdown("<script>document.querySelectorAll('button[kind=\"secondary\"]')[3].classList.add('kpi-btn');</script>", unsafe_allow_html=True)
 
             with pc2:
-                ent_pass_rate = (correct_entities / total_entities) if total_entities else 0
-                kpi_card("🔢 Entity Pass Rate", f"{ent_pass_rate:.2%}" if total_entities else "N/A")
+                kpi_card("🔢 Entity Accuracy (Pass)", f"{pass_ent_pct:.2%}" if not pd.isna(pass_ent_pct) else "N/A")
                 if st.button("Show Emails", key="btn_ent_pass", use_container_width=True):
                     st.session_state["detail_filter"] = "ent_pass"
                     st.session_state["jump_to_detail"] = True
                     st.rerun()
-                st.markdown("<script>document.querySelectorAll('button[kind=\"secondary\"]')[3].classList.add('kpi-btn');</script>", unsafe_allow_html=True)
 
-            with pc3: 
-                intent_pass_acc = df_filtered[df_filtered["is_correct"] == 1]["intent_accuracy"].mean()
-                kpi_card("🧠 Intent Pass Rate", f"{intent_pass_acc:.2%}")
+            with pc3:
+                kpi_card("🧠 Intent Accuracy (Pass)", f"{pass_int_pct:.2%}" if not pd.isna(pass_int_pct) else "N/A")
                 if st.button("Show Emails", key="btn_int_pass", use_container_width=True):
                     st.session_state["detail_filter"] = "intent_pass"
                     st.session_state["jump_to_detail"] = True
                     st.rerun()
-                st.markdown("<script>document.querySelectorAll('button[kind=\"secondary\"]')[3].classList.add('kpi-btn');</script>", unsafe_allow_html=True)
 
             st.markdown("</div>", unsafe_allow_html=True)
 
+        # -------------------- FAIL Breakdown Panel --------------------
         elif st.session_state.get("main_filter") == "fail":
             st.markdown("""
             <div style="border:1px solid #e5e7eb;background:#fff7f7;border-radius:12px;
@@ -424,22 +445,21 @@ if st.session_state["active_page"] == "📊 Overview":
 
             fc1, fc2, fc3 = st.columns(3)
             with fc1:
-                fail_cat_rate = ((total_categories - correct_categories) / total_categories) if total_categories else 0
-                kpi_card("🏷 Category Fail Rate", f"{fail_cat_rate:.2%}" if total_categories else "N/A")
+                kpi_card("🎯 Category Accuracy (Fail)", f"{fail_cat_pct:.2%}" if not pd.isna(fail_cat_pct) else "N/A")
                 if st.button("Show Emails", key="btn_cat_fail", use_container_width=True):
                     st.session_state["detail_filter"] = "cat_fail"
                     st.session_state["jump_to_detail"] = True
                     st.rerun()
+
             with fc2:
-                fail_ent_rate = ((total_entities - correct_entities) / total_entities) if total_entities else 0
-                kpi_card("🔢 Entity Fail Rate", f"{fail_ent_rate:.2%}" if total_entities else "N/A")
+                kpi_card("🔢 Entity Accuracy (Fail)", f"{fail_ent_pct:.2%}" if not pd.isna(fail_ent_pct) else "N/A")
                 if st.button("Show Emails", key="btn_ent_fail", use_container_width=True):
                     st.session_state["detail_filter"] = "ent_fail"
                     st.session_state["jump_to_detail"] = True
                     st.rerun()
+
             with fc3:
-                intent_fail_acc = df_filtered[df_filtered["is_correct"] == 0]["intent_accuracy"].mean()
-                kpi_card("🧠 Intent Fail Rate", f"{intent_fail_acc:.2%}")
+                kpi_card("🧠 Intent Accuracy (Fail)", f"{fail_int_pct:.2%}" if not pd.isna(fail_int_pct) else "N/A")
                 if st.button("Show Emails", key="btn_int_fail", use_container_width=True):
                     st.session_state["detail_filter"] = "intent_fail"
                     st.session_state["jump_to_detail"] = True
@@ -491,11 +511,20 @@ elif st.session_state["active_page"] == "📋 Detailed Table":
     pct_kept = (rows_in_view / total_after_sidebar * 100) if total_after_sidebar else 0
     pct_removed = 100 - pct_kept
 
-    m1, m2 = st.columns(2)
-    with m1:
-        st.metric("Rows in this view", rows_in_view)
-    with m2:
-        st.metric("Rows after applying Filters in the Sidebar", total_after_sidebar)
+    st.markdown(f"""
+    <div style="display: flex; gap: 2rem; align-items: center;">
+        <div style="min-width: 220px; padding: 0.75rem 1.25rem; background-color: #f0f2f6; border-radius: 10px;">
+            <div style="font-size: 0.8rem; color: #6c757d; font-weight: bold;">Rows in this view</div>
+            <div style="font-size: 1.8rem; font-weight: bold;">{rows_in_view}</div>
+        </div>
+        <div style="min-width: 220px; padding: 0.75rem 1.25rem; background-color: #f0f2f6; border-radius: 10px;">
+            <div style="font-size: 0.8rem; color: #6c757d; font-weight: bold;">After sidebar filters</div>
+            <div style="font-size: 1.8rem; font-weight: bold;">{total_after_sidebar}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<div style='margin-top: 1.2rem;'></div>", unsafe_allow_html=True)
 
     # Badge + clear
     col_badge, col_clear = st.columns([4,1])
