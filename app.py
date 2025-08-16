@@ -413,21 +413,21 @@ if st.session_state["active_page"] == "📊 Overview":
 
             pc1, pc2, pc3 = st.columns(3)
             with pc1:
-                kpi_card("🎯 Category Accuracy (Pass)", f"{pass_cat_pct:.2%}" if not pd.isna(pass_cat_pct) else "N/A")
+                kpi_card("🎯 Category % (Pass)", f"{pass_cat_pct:.2%}" if not pd.isna(pass_cat_pct) else "N/A")
                 if st.button("Show Emails", key="btn_cat_pass", use_container_width=True):
                     st.session_state["detail_filter"] = "cat_pass"
                     st.session_state["jump_to_detail"] = True
                     st.rerun()
 
             with pc2:
-                kpi_card("🔢 Entity Accuracy (Pass)", f"{pass_ent_pct:.2%}" if not pd.isna(pass_ent_pct) else "N/A")
+                kpi_card("🔢 Entity % (Pass)", f"{pass_ent_pct:.2%}" if not pd.isna(pass_ent_pct) else "N/A")
                 if st.button("Show Emails", key="btn_ent_pass", use_container_width=True):
                     st.session_state["detail_filter"] = "ent_pass"
                     st.session_state["jump_to_detail"] = True
                     st.rerun()
 
             with pc3:
-                kpi_card("🧠 Intent Accuracy (Pass)", f"{pass_int_pct:.2%}" if not pd.isna(pass_int_pct) else "N/A")
+                kpi_card("🧠 Intent % (Pass)", f"{pass_int_pct:.2%}" if not pd.isna(pass_int_pct) else "N/A")
                 if st.button("Show Emails", key="btn_int_pass", use_container_width=True):
                     st.session_state["detail_filter"] = "intent_pass"
                     st.session_state["jump_to_detail"] = True
@@ -445,21 +445,21 @@ if st.session_state["active_page"] == "📊 Overview":
 
             fc1, fc2, fc3 = st.columns(3)
             with fc1:
-                kpi_card("🎯 Category Accuracy (Fail)", f"{fail_cat_pct:.2%}" if not pd.isna(fail_cat_pct) else "N/A")
+                kpi_card("🎯 Category % (Fail)", f"{fail_cat_pct:.2%}" if not pd.isna(fail_cat_pct) else "N/A")
                 if st.button("Show Emails", key="btn_cat_fail", use_container_width=True):
                     st.session_state["detail_filter"] = "cat_fail"
                     st.session_state["jump_to_detail"] = True
                     st.rerun()
 
             with fc2:
-                kpi_card("🔢 Entity Accuracy (Fail)", f"{fail_ent_pct:.2%}" if not pd.isna(fail_ent_pct) else "N/A")
+                kpi_card("🔢 Entity % (Fail)", f"{fail_ent_pct:.2%}" if not pd.isna(fail_ent_pct) else "N/A")
                 if st.button("Show Emails", key="btn_ent_fail", use_container_width=True):
                     st.session_state["detail_filter"] = "ent_fail"
                     st.session_state["jump_to_detail"] = True
                     st.rerun()
 
             with fc3:
-                kpi_card("🧠 Intent Accuracy (Fail)", f"{fail_int_pct:.2%}" if not pd.isna(fail_int_pct) else "N/A")
+                kpi_card("🧠 Intent % (Fail)", f"{fail_int_pct:.2%}" if not pd.isna(fail_int_pct) else "N/A")
                 if st.button("Show Emails", key="btn_int_fail", use_container_width=True):
                     st.session_state["detail_filter"] = "intent_fail"
                     st.session_state["jump_to_detail"] = True
