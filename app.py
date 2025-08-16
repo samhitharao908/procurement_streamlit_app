@@ -86,6 +86,29 @@ button.kpi span.kpi-value {
 </style>
 """, unsafe_allow_html=True)
 
+st.markdown("""
+<style>
+/* Styled breakdown buttons */
+button.kpi-btn {
+    background-color: #f0f2f6;
+    color: #111;
+    font-weight: 700;
+    font-size: 1rem;
+    padding: 0.75rem 1.25rem;
+    border-radius: 12px;
+    border: none;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+    width: 100%;
+    transition: box-shadow .12s ease, transform .12s ease;
+}
+button.kpi-btn:hover {
+    box-shadow: 0 4px 16px rgba(0,0,0,0.10);
+    transform: translateY(-2px);
+}
+</style>
+""", unsafe_allow_html=True)
+
+
 def kpi_button(label, value, key):
     # Use \n to create two lines; CSS will handle layout
     # NOTE: Streamlit doesn't support HTML inside button text, so we mimic with two lines.
@@ -94,10 +117,10 @@ def kpi_button(label, value, key):
 # -------------------- Cached Data Loader --------------------
 @st.cache_data(show_spinner=True)
 def load_data(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, encoding='cp1252')
     df.columns = df.columns.str.strip().str.lower()
     if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df["timestamp"] = pd.to_datetime(df["timestamp"], format="%d-%m-%Y %H:%M", errors="coerce") 
     return df
 
 # -------------------- UI Helpers --------------------
@@ -169,7 +192,7 @@ if st.session_state.get("jump_to_detail"):
     st.session_state["jump_to_detail"] = False
 
 # -------------------- Data --------------------
-CSV_PATH = "procurement_emails_with_slm_score.csv"
+CSV_PATH = "procurement_emails.csv"
 df = load_data(CSV_PATH)
 
 st.title("📧 Automated Email Processing Evaluation Suite")
@@ -177,13 +200,13 @@ st.title("📧 Automated Email Processing Evaluation Suite")
 # -------------------- Sidebar Filters --------------------
 with st.sidebar:
     st.header("Filters")
-    st.markdown("### Date Range")
+    st.markdown("##### Date Range")
 
     date_option = st.selectbox(
         "Quick Ranges",
         options=[
             "All Time", "Today", "Yesterday", "Last 7 Days", "Last 30 Days",
-            "Past Go-Live Phase 1", "Past Go-Live Phase 2", "Custom Range"
+            "Post Go-Live Phase 1", "Post Go-Live Phase 2", "Custom Range"
         ],
         index=0
     )
@@ -193,7 +216,7 @@ with st.sidebar:
     today = pd.to_datetime("today").normalize()
 
     # Go-Live dates (adjust if needed)
-    go_live_phase1 = pd.to_datetime("2025-06-01")
+    go_live_phase1 = pd.to_datetime("2025-03-01")
     go_live_phase2 = pd.to_datetime("2025-07-20")
 
     if date_option == "All Time":
@@ -219,6 +242,10 @@ with st.sidebar:
         end_date = st.date_input("End Date", min_value=min_date.date(), max_value=max_date.date(), value=max_date.date())
         start_date = pd.to_datetime(start_date)
         end_date = pd.to_datetime(end_date)
+
+    if "start_date" not in locals() or "end_date" not in locals():
+        start_date = df["timestamp"].min()
+        end_date = df["timestamp"].max()
 
     df_filtered = df[(df["timestamp"] >= start_date) & (df["timestamp"] <= end_date)].copy()
 
@@ -247,9 +274,17 @@ df_filtered["entity_accuracy"] = df_filtered.apply(
 # Email-level accuracy = (category_correct + entity_accuracy) / 2
 df_filtered["email_accuracy"] = (df_filtered["category_correct"] + df_filtered["entity_accuracy"]) / 2
 
+total_rows = len(df)
+filtered_rows = len(df_filtered)
+
+# Intent accuracy (binary)
+if "expected_intent" in df_filtered.columns and "intent_identified" in df_filtered.columns:
+    df_filtered["intent_accuracy"] = (df_filtered["expected_intent"] == df_filtered["intent_identified"]).astype(int)
+else:
+    df_filtered["intent_accuracy"] = np.nan  # fallback if missing
+
 # -------------------- NAV (radio we can control) --------------------
 PAGES = ["📊 Overview", "📋 Detailed Table", "🛠️ Technical View"]
-st.markdown("### View")
 nav = st.radio(
     label="Select view",
     options=PAGES,
@@ -311,27 +346,37 @@ if st.session_state["active_page"] == "📊 Overview":
         st.markdown("<div style='margin-top: 1.2rem;'></div>", unsafe_allow_html=True)
 
         # Row 2 – Accuracy KPIs
-        r2c1, r2c2, r2c3 = st.columns(3)
+        r2c1, r2c2, r2c3, r2c4 = st.columns(4)
         with r2c1:
             kpi_card("📈 Email Accuracy", f"{avg_accuracy:.2%}")
         with r2c2:
             kpi_card("🏷️ Category Accuracy", "N/A" if pd.isna(category_accuracy) else f"{category_accuracy:.2%}")
         with r2c3:
             kpi_card("🔢 Entity Accuracy", f"{(correct_entities / total_entities):.2%}" if total_entities else "N/A")
+        with r2c4:
+            intent_acc = df_filtered["intent_accuracy"].mean()
+            kpi_card("🧠 Intent Accuracy", "N/A" if pd.isna(intent_acc) else f"{intent_acc:.2%}")
+
 
         # ---- Breakdown controls (buttons at bottom row) ----
         st.markdown("<div style='margin-top: 1.2rem;'></div>", unsafe_allow_html=True)
         bc1, bc2, bc3 = st.columns([1,1,4])
+
         with bc1:
-            if st.button("Show Pass Breakdown", use_container_width=True):
+            if st.button("Show Pass Breakdown", key="btn_show_pass"):
                 st.session_state["main_filter"] = "pass"
+            st.markdown("<script>document.querySelectorAll('button[kind=\"secondary\"]')[0].classList.add('kpi-btn');</script>", unsafe_allow_html=True)
+
         with bc2:
-            if st.button("Show Fail Breakdown", use_container_width=True):
+            if st.button("Show Fail Breakdown", key="btn_show_fail"):
                 st.session_state["main_filter"] = "fail"
-        # optional clear
+            st.markdown("<script>document.querySelectorAll('button[kind=\"secondary\"]')[1].classList.add('kpi-btn');</script>", unsafe_allow_html=True)
+
         with bc3:
-            if st.button("Clear Breakdown", use_container_width=False):
+            if st.button("Clear Breakdown", key="btn_clear"):
                 st.session_state["main_filter"] = None
+            st.markdown("<script>document.querySelectorAll('button[kind=\"secondary\"]')[2].classList.add('kpi-btn');</script>", unsafe_allow_html=True)
+
         # ---- Styled breakdown panels (appear based on main_filter) ----
         if st.session_state.get("main_filter") == "pass":
             st.markdown("""
@@ -340,7 +385,7 @@ if st.session_state["active_page"] == "📊 Overview":
             <div style="font-weight:700;margin-bottom:.75rem;">✅ Pass Breakdown</div>
             """, unsafe_allow_html=True)
 
-            pc1, pc2 = st.columns(2)
+            pc1, pc2, pc3 = st.columns(3)
             with pc1:
                 cat_pass_rate = (correct_categories / total_categories) if total_categories else 0
                 kpi_card("🏷 Category Pass Rate", f"{cat_pass_rate:.2%}")
@@ -348,6 +393,8 @@ if st.session_state["active_page"] == "📊 Overview":
                     st.session_state["detail_filter"] = "cat_pass"
                     st.session_state["jump_to_detail"] = True
                     st.rerun()
+                st.markdown("<script>document.querySelectorAll('button[kind=\"secondary\"]')[3].classList.add('kpi-btn');</script>", unsafe_allow_html=True)
+
             with pc2:
                 ent_pass_rate = (correct_entities / total_entities) if total_entities else 0
                 kpi_card("🔢 Entity Pass Rate", f"{ent_pass_rate:.2%}" if total_entities else "N/A")
@@ -355,6 +402,16 @@ if st.session_state["active_page"] == "📊 Overview":
                     st.session_state["detail_filter"] = "ent_pass"
                     st.session_state["jump_to_detail"] = True
                     st.rerun()
+                st.markdown("<script>document.querySelectorAll('button[kind=\"secondary\"]')[3].classList.add('kpi-btn');</script>", unsafe_allow_html=True)
+
+            with pc3: 
+                intent_pass_acc = df_filtered[df_filtered["is_correct"] == 1]["intent_accuracy"].mean()
+                kpi_card("🧠 Intent Pass Rate", f"{intent_pass_acc:.2%}")
+                if st.button("Show Emails", key="btn_int_pass", use_container_width=True):
+                    st.session_state["detail_filter"] = "intent_pass"
+                    st.session_state["jump_to_detail"] = True
+                    st.rerun()
+                st.markdown("<script>document.querySelectorAll('button[kind=\"secondary\"]')[3].classList.add('kpi-btn');</script>", unsafe_allow_html=True)
 
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -365,7 +422,7 @@ if st.session_state["active_page"] == "📊 Overview":
             <div style="font-weight:700;margin-bottom:.75rem;">❌ Fail Breakdown</div>
             """, unsafe_allow_html=True)
 
-            fc1, fc2 = st.columns(2)
+            fc1, fc2, fc3 = st.columns(3)
             with fc1:
                 fail_cat_rate = ((total_categories - correct_categories) / total_categories) if total_categories else 0
                 kpi_card("🏷 Category Fail Rate", f"{fail_cat_rate:.2%}" if total_categories else "N/A")
@@ -380,6 +437,13 @@ if st.session_state["active_page"] == "📊 Overview":
                     st.session_state["detail_filter"] = "ent_fail"
                     st.session_state["jump_to_detail"] = True
                     st.rerun()
+            with fc3:
+                intent_fail_acc = df_filtered[df_filtered["is_correct"] == 0]["intent_accuracy"].mean()
+                kpi_card("🧠 Intent Fail Rate", f"{intent_fail_acc:.2%}")
+                if st.button("Show Emails", key="btn_int_fail", use_container_width=True):
+                    st.session_state["detail_filter"] = "intent_fail"
+                    st.session_state["jump_to_detail"] = True
+                    st.rerun()
 
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -392,27 +456,46 @@ elif st.session_state["active_page"] == "📋 Detailed Table":
     # Build filtered subset per mode
     if mode == "cat_pass":
         df2 = df_filtered[df_filtered["category"] == df_filtered["category_identified"]].copy()
-        badge = "Category PASS (identified matches actual)"
+        badge = "Breakdown Filter applied: Category PASS (identified matches actual)"
     elif mode == "cat_fail":
         df2 = df_filtered[df_filtered["category"] != df_filtered["category_identified"]].copy()
-        badge = "Category FAIL (identified ≠ actual)"
+        badge = "Breakdown Filter applied: Category FAIL (identified does not match actual)"
     elif mode == "ent_pass":
         df2 = df_filtered[(df_filtered["number_of_entities"] > 0) &
                           (df_filtered["number_of_entities_identified"] == df_filtered["number_of_entities"])].copy()
-        badge = "Entity PASS (all entities found)"
+        badge = "Breakdown Filter applied: Entity PASS (all entities found)"
     elif mode == "ent_fail":
         df2 = df_filtered[(df_filtered["number_of_entities"] > 0) &
                           (df_filtered["number_of_entities_identified"] < df_filtered["number_of_entities"])].copy()
-        badge = "Entity FAIL (missed entities)"
+        badge = "Breakdown Filter applied: Entity FAIL (missed entities)"
     elif mode == "pass":
         df2 = df_filtered[df_filtered["is_correct"] == 1].copy()
-        badge = "Email PASS (is_correct = 1)"
+        badge = "Breakdown Filter applied: Email PASS (is_correct = 1)"
     elif mode == "fail":
         df2 = df_filtered[df_filtered["is_correct"] == 0].copy()
-        badge = "Email FAIL (is_correct = 0)"
+        badge = "Breakdown Filter applied: Email FAIL (is_correct = 0)"
+    elif mode == "intent_pass":
+        df2 = df_filtered[df_filtered["intent_accuracy"] == 1].copy()
+        badge = "Breakdown Filter applied: Intent PASS (matched)"
+    elif mode == "intent_fail":
+        df2 = df_filtered[df_filtered["intent_accuracy"] == 0].copy()
+        badge = "Breakdown Filter applied: Intent FAIL (mismatch)"
     else:
         df2 = df_filtered.copy()
         badge = "No breakdown filter applied"
+
+    # --- Row counters for Detailed Table ---
+    total_after_sidebar = len(df_filtered)   # rows after sidebar filters
+    rows_in_view = len(df2)                  # rows after breakdown mode
+    filtered_out_here = total_after_sidebar - rows_in_view
+    pct_kept = (rows_in_view / total_after_sidebar * 100) if total_after_sidebar else 0
+    pct_removed = 100 - pct_kept
+
+    m1, m2 = st.columns(2)
+    with m1:
+        st.metric("Rows in this view", rows_in_view)
+    with m2:
+        st.metric("Rows after applying Filters in the Sidebar", total_after_sidebar)
 
     # Badge + clear
     col_badge, col_clear = st.columns([4,1])
@@ -453,7 +536,8 @@ elif st.session_state["active_page"] == "📋 Detailed Table":
     df2["to"] = df2["to_email"]
     table_cols = [
         "sl_number", "timestamp", "from", "to", "subject",
-        "category", "category_identified", "pred_confidence",
+        "category", "category_identified", "pred_confidence", 
+        "expected_intent", "intent_identified",
         "number_of_entities", "number_of_entities_identified",
         "entities_identified", "cluster_id", "llm_judge_score", "slm_score"
     ]
@@ -461,7 +545,25 @@ elif st.session_state["active_page"] == "📋 Detailed Table":
 
     gb = GridOptionsBuilder.from_dataframe(df_display)
     gb.configure_selection("single", use_checkbox=False)
-    gb.configure_default_column(filter=True, sortable=True, resizable=True, wrapText=True, autoHeight=True)
+
+    gb.configure_default_column(filter=True, sortable=True)
+    gb.configure_column("sl_number", headerName="SL#", width=80)
+    gb.configure_column("timestamp", headerName="Timestamp", width=160)
+    gb.configure_column("from", headerName="From", width=200)
+    gb.configure_column("to", headerName="To", width=200)
+    gb.configure_column("subject", headerName="Subject", width=300)
+    gb.configure_column("category", headerName="Category", width=150)
+    gb.configure_column("category_identified", headerName="Identified Category", width=180)
+    gb.configure_column("pred_confidence", headerName="Prediction Confidence", width=180)
+    gb.configure_column("expected_intent", headerName="Expected Intent", width=180)
+    gb.configure_column("intent_identified", headerName="Intent Identified", width=180)
+    gb.configure_column("number_of_entities", headerName="# Entities", width=120)
+    gb.configure_column("number_of_entities_identified", headerName="# Entities Found", width=160)
+    gb.configure_column("entities_identified", headerName="Entities Identified", width=250)
+    gb.configure_column("cluster_id", headerName="Cluster ID", width=120)
+    gb.configure_column("llm_judge_score", headerName="LLM Score", width=120)
+    gb.configure_column("slm_score", headerName="SLM Score", width=120)
+
     grid_options = gb.build()
 
     grid_response = AgGrid(
@@ -482,6 +584,7 @@ elif st.session_state["active_page"] == "📋 Detailed Table":
         st.markdown(f"**From:** `{email_row['from']}`")
         st.markdown(f"**To:** `{email_row['to']}`")
         st.markdown(f"**Category:** `{email_row['category']}`  |  **Identified:** `{email_row['category_identified']}`")
+        st.markdown(f"**Intent of Email:** `{email_row['expected_intent']}`  |  **Identified:** `{email_row['intent_identified']}`")
         st.markdown("**Email Body:**")
         highlighted = highlight_entities(email_row["original_email"], email_row["entities_identified"])
         st.markdown(
